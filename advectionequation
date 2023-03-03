@@ -1,0 +1,224 @@
+
+
+#include <stdio.h>
+#include <math.h>
+#include <omp.h>
+/*********************************************************************
+                      Main function
+**********************************************************************/
+
+int main(){
+
+  /* Grid properties */
+  const int NX=1000;    // Number of x points
+  const int NY=1000;    // Number of y points
+  const float xmin=0.0; // Minimum x value
+  const float xmax=30.0; // Maximum x value (Computational Domain changed to 30)
+  const float ymin=0.0; // Minimum y value
+  const float ymax=30.0; // Maximum y value (Computational Domain changed to 30)
+  
+  /* Parameters for the Gaussian initial conditions */
+  const float x0=0.1;                    // Centre(x)(This value will not be used in this iteration)
+  const float y0=15.0;                    // Centre(y)
+  const float sigmax=0.03;               // Width(x)(This value will not be used in this iteration)
+  const float sigmay=5.00;               // Width(y)
+  const float sigmax2 = sigmax * sigmax; // Width(x) squared
+  const float sigmay2 = sigmay * sigmay; // Width(y) squared
+
+  /* DEFINING TIME RELATED VARIABLES */
+  const float t0 = 3.0;             //parameters given in 2.2
+  const float sigmat = 1.0;         //parameters given in 2.2
+  const float sigmat2 = sigmat * sigmat; // squared
+  float t2;                        // squared 
+  float t;                         //value of time in perticular iteration 
+
+  /* DEFINING VERTICAL SHEAR VARIABLES */
+  const float z0 = 1.0;        //ROUGHNESS LENGTH
+  const float k  = 0.41;       //VON KARMAN CONSTANT
+  const float u_str = 0.1;     //FRICTION VELOCITY
+
+  /* Boundary conditions */
+  const float bval_left=0.0;    // Left boudnary value(Will be replaced further doen in the code)
+  const float bval_right=0.0;   // Right boundary value
+  const float bval_lower=0.0;   // Lower boundary
+  const float bval_upper=0.0;   // Upper bounary
+  
+  /* Time stepping parameters */
+  const float CFL=0.9;   // CFL number 
+  const int nsteps=1000; // Number of time steps (changed to 1000)
+
+  /* Velocity */
+  float velx = 1.0; // Velocity in x direction(Horizontal vel set to 1m/s)
+  const float vely=0.00; // Velocity in y direction (Vertical velocity changed to 0m/s)
+   
+ 
+  /* Arrays to store variables. These have NX+2 elements
+     to allow boundary values to be stored at both ends */
+  float x[NX+2];          // x-axis values
+  float y[NX+2];          // y-axis values
+  float u[NX+2][NY+2];    // Array of u values
+  float dudt[NX+2][NY+2]; // Rate of change of u
+
+  /* CREATING AN ARRAY TO STORE VERTICAL AVERAGED DISTRIBUTION  */
+  float uy_avg[NX];
+
+
+  float x2;   // x squared (used to calculate iniital conditions)(no longer needed)
+  float y2;   // y squared (used to calculate iniital conditions)(no longer needed)
+  
+  /* Calculate distance between points */
+  float dx = (xmax-xmin) / ( (float) NX);
+  float dy = (ymax-ymin) / ( (float) NY);
+  
+  /* Calculate time step using the CFL condition */
+  /* The fabs function gives the absolute value in case the velocity is -ve */
+  float dt = CFL / ( (fabs(velx) / dx) + (fabs(vely) / dy) );
+  
+  /*** Report information about the calculation ***/
+  printf("Grid spacing dx     = %g\n", dx);
+  printf("Grid spacing dy     = %g\n", dy);
+  printf("CFL number          = %g\n", CFL);
+  printf("Time step           = %g\n", dt);
+  printf("No. of time steps   = %d\n", nsteps);
+  printf("End time            = %g\n", dt*(float) nsteps);
+  printf("Distance advected x = %g\n", velx*dt*(float) nsteps);
+  printf("Distance advected y = %g\n", vely*dt*(float) nsteps);
+
+  /*** Place x points in the middle of the cell ***/
+  /* LOOP 1 */
+  /* THIS LOOP WORKS IN PARALLEL AS THERE ARE NO OUTSIDE DEPENDANCIES x IS DECLARED OUTSIDE BEFORE PARALLEL REGION 
+      HENCE IT IS BY DEFAULT SHARED  */ 
+  #pragma omp parallel for
+  for (int i=0; i<NX+2; i++){
+    x[i] = ( (float) i - 0.5) * dx;
+  }
+
+  /*** Place y points in the middle of the cell ***/
+  /* LOOP 2 */
+  #pragma omp parallel for
+  for (int j=0; j<NY+2; j++){
+    y[j] = ( (float) j - 0.5) * dy;
+  }
+
+  /*** Setting up initial conditionsas per section 2.2 with u(x,y)=0 everywhere ***/
+  /* LOOP 3 */ 
+  /* THIS LOOP WORKED IN PARALLEL BY PUTTING x2 and y2 AS PRIVATE AND BY DEFAULT x,y,u WERE SHARED THE COMMENTED PORTION OF LOOP
+      WAS NOT REQUIRED FOR PART 2.2 AND 2.3  */
+  #pragma omp parallel for default (none) shared(x,y,u) private(x2,y2)
+  for (int i=0; i<NX+2; i++){
+    for (int j=0; j<NY+2; j++){
+     /* x2      = (x[i]-x0) * (x[i]-x0);*/
+     /* y2      = (y[j]-y0) * (y[j]-y0);*/
+      u[i][j] = 0;
+    }
+  }
+
+  /*** Write array of initial u values out to file ***/
+  FILE *initialfile;
+  initialfile = fopen("initial_parallel.dat", "w");
+  /* LOOP 4 */
+  /* THIS LOOP COULDN'T BE PARALLELISED AS IT IS PRINTING OUT THE INPUT VALUES WHICH ARE OBTAINED FROM LOOP 1,2,3 AND VALUES
+      /* NEED TO BE IN ORDER */ 
+  for (int i=0; i<NX+2; i++){
+    for (int j=0; j<NY+2; j++){
+      fprintf(initialfile, "%g %g %g\n", x[i], y[j], u[i][j]);
+    }
+  }
+  fclose(initialfile);
+  
+  /*** Update solution by looping over time steps ***/
+  /* LOOP 5 */
+  /* LOOP 5 CANNOT BE PARALLELISED AS TIME STEPS NEED TO RUN IN SEQUENTIAL ORDER AND DUE TO DATA DEPENDANCY */
+  for (int m=0; m<nsteps; m++){
+    
+    t = (float) m * (float)dt;     //denotes time at mth step.
+
+    /*** Apply boundary conditions at u[0][:] and u[NX+1][:] ***/
+    /* LOOP 6 */
+    /* LOOP CAN BE PARALLELISED BY SCOPING t2 & y2 VARIABLES AS PRIVATE AS THEY MUST BE UNIQUE TO THE THREAD FOR
+       BOUNDARY CONDITION CALCULATION  */	
+    #pragma omp parallel for private(t2,y2)    
+    for (int j=0; j<NY+2; j++){
+      t2  = ((float)t - t0) * ((float)t - t0);
+      y2  = (y[j]-y0)*(y[j]-y0);	
+      u[0][j]    = exp (-1.0 * ((t2/(2.0*sigmat2)) + (y2/(2.0* sigmay2))));
+      u[NX+1][j] = bval_right;
+    }
+
+    /*** Apply boundary conditions at u[:][0] and u[:][NY+1] ***/
+    /* LOOP 7 */
+    /* LOOP CAN BE PARALLELISED AS THERE ARE NO DEPENDECIES AND SEQUENCE REQUIREMENT, NO NEED TO SCOPE EITHER*/
+    #pragma omp parallel for
+    for (int i=0; i<NX+2; i++){
+      u[i][0]    = bval_lower;
+      u[i][NY+1] = bval_upper;
+    }
+    
+    /*** Calculate rate of change of u using leftward difference ***/
+    /* Loop over points in the domain but not boundary values */
+    /* LOOP 8 */
+    /* LOOP CAN BE PARALLELISED BY SCOPING velx AS PRIVATE AS THAT HAS TO BE UNIQUE TO A THREAD FOR dudt CALCULATION  */
+    #pragma omp parallel for private(velx)
+    for (int i=1; i<NX+1; i++){
+      for (int j=1; j<NY+1; j++){
+
+      if(y[j] > z0){
+	velx = (u_str/k) * log(y[j]/z0); // ADDING VERTICAL SHEAR BY CALCULATING HORIZONTAL VELOCITY
+	}
+      else{
+	velx = 0.0;
+        }
+
+	dudt[i][j] = -velx * (u[i][j] - u[i-1][j]) / dx
+	            - vely * (u[i][j] - u[i][j-1]) / dy;
+      }
+    }
+    
+    /*** Update u from t to t+dt ***/
+    /* Loop over points in the domain but not boundary values */
+    /* LOOP 9 */
+    /* THIS LOOP CAN ALSO BE PARALLELISED AS THERE ARE NO DEPENDENCYNO NEED FOR SCOPING EITHER   */
+    #pragma omp parallel for
+    for	(int i=1; i<NX+1; i++){
+      for (int j=1; j<NY+1; j++){
+	u[i][j] = u[i][j] + dudt[i][j] * dt;
+      }
+    }
+    
+  } // time loop
+
+  /* LOOP TO CALCULATE AVERAGE VERTICAL DISTRIBUTION OF u  */
+  for(int i=1; i<NX+1; i++){
+    float sum = 0.0;
+    for(int j=1; j<NY; j++){
+      sum += u[i][j];
+    }
+     uy_avg[i-1] = sum/NY;
+  }
+
+
+  /***** PUTTING VERTICAL AVERGAE AS FUNCTION OF X IN final_VA.dat FILE FOR PLOTTING *****/
+  FILE *finalfile1;
+  finalfile1 = fopen("final_VA.dat", "w");  
+  /* LOOP 11 */
+  for (int i=0; i<NX+1; i++){
+       fprintf(finalfile1, "%g %g\n", x[i], uy_avg[i]);
+  }  
+
+
+
+  /*** Write array of final u values out to file ***/
+  FILE *finalfile;
+  finalfile = fopen("final.dat", "w");
+  /* LOOP 10 */
+  for (int i=0; i<NX+2; i++){
+    for (int j=0; j<NY+2; j++){
+      fprintf(finalfile, "%g %g %g\n", x[i], y[j], u[i][j]);
+    }
+  }
+  fclose(finalfile);
+
+  return 0;
+}
+
+/* End of file *****************************************************/
